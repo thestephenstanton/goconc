@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,8 +17,11 @@ func main() {
 		later(4*time.Second),
 	)
 
-	fmt.Printf("waited %s", time.Since(start).String())
+	fmt.Printf("waited %s\n", time.Since(start).String())
+	fmt.Printf("%d go routines spawned\n", i.Load())
 }
+
+var i atomic.Int32
 
 func later(t time.Duration) <-chan any {
 	c := make(chan any)
@@ -41,10 +45,13 @@ func or(c ...<-chan any) <-chan any {
 	done := make(chan any)
 
 	go func() {
+		i.Add(1) // just here for test
 		defer close(done)
 
 		switch len(c) {
 		case 2:
+			// doing this allows us to have len(c)/2 go routines spawned
+			// and if we didn't then it would be len(c)-1 go routines
 			select {
 			case <-c[0]:
 			case <-c[1]:
