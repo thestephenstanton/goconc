@@ -1,6 +1,9 @@
 package main
 
+// this is a very defensive implementation of this problem
+
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
@@ -22,48 +25,91 @@ func main() {
 	os.Exit(0)
 }
 
+type sig struct{}
+
 var lightDirections = []string{"North", "East", "South", "West"}
 
-type lightControl struct {
-	turnGreen chan<- any
-	backToRed <-chan any
+func otherDirections(i int) []string {
+	other := make([]string, 0, len(lightDirections)-1)
+
+	for j, d := range lightDirections {
+		if i == j {
+			continue
+		}
+
+		other = append(other, d)
+	}
+
+	return other
 }
 
 func run() error {
 	start := time.Now()
 
-	done := make(chan any)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	lightControls := make([]lightControl, 0, len(lightDirections))
+	pedestrian := make(chan sig)
 
-	for _, d := range lightDirections {
-		turnGreen := make(chan any)
-		backToRed := light(done, turnGreen, d)
+	lights := make([]Light, 0, len(lightDirections))
 
-		lightControls = append(lightControls, lightControl{
-			turnGreen: turnGreen,
-			backToRed: backToRed,
-		})
+	for i, d := range lightDirections {
+		otherDirections := otherDirections(i)
+
+		light := NewLight(d, otherDirections)
+		light.Start()
+		lights = append(lights, light)
 	}
 
-	time.AfterFunc(10*time.Second, func() { close(done) })
-
-	pedestrian := make(chan any)
-
 	go func() {
-		time.After(time.Duration(rand.Intn(5)+1) * time.Second)
-		pedestrian <- nil
+		d := time.Duration(rand.Intn(5)+1) * time.Second
+
+		// d += time.Duration(200 * time.Millisecond)
+
+		<-time.After(d)
+		pedestrian <- sig{}
 	}()
+
+	time.Sleep(5 * time.Millisecond)
 
 loop:
 	for {
-		for _, light := range lightControls {
-			light.turnGreen <- nil
+		for _, light := range lights {
+			finished, ok := light.TurnGreen()
+			if !ok {
+				return fmt.Errorf("turning light %s green", light.direction)
+			}
+
+			finishCtx, finishCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer finishCancel()
 
 			select {
-			case <-light.backToRed:
-			case <-done:
+			case <-ctx.Done():
 				break loop
+			case <-finishCtx.Done():
+				return fmt.Errorf("light %s took too long to change back", light.direction)
+			case <-finished:
+				finishCancel()
+			case <-pedestrian:
+				pedestrianStart := time.Now()
+
+				ok := light.Interupt()
+				if !ok {
+					// this should be a very rare condition, this should only be able to happen
+					// if between the time that we are signaled a pedestrian is cross and us calling
+					// Interupt(), the light changes from green back to red. so basically after this
+					// case statement starts but before the Interupt(). but we still continue as normal
+					slog.Info("rare edge found!")
+				}
+
+				slog.Info("pedestrian crossing...")
+
+				select {
+				case <-time.After(1 * time.Second):
+					slog.Info("...pedestrian finished crossing", "timeTaken", time.Since(pedestrianStart).String())
+				case <-ctx.Done():
+					break loop
+				}
 			}
 		}
 	}
@@ -73,41 +119,70 @@ loop:
 	return nil
 }
 
-func light(done <-chan any, turnGreen <-chan any, direction string) <-chan any {
-	backToRed := make(chan any)
+type Light struct {
+	direction       string
+	otherDirections string
 
-	var otherDirections string
+	done      chan sig
+	turnGreen chan chan sig
+	interupt  chan sig
+}
 
-	for _, d := range lightDirections {
-		if d == direction {
-			continue
-		}
-
-		otherDirections += d + "/"
+func NewLight(direction string, otherDirections []string) Light {
+	return Light{
+		direction:       direction,
+		otherDirections: strings.Join(otherDirections, "/"),
+		done:            make(chan sig),
+		turnGreen:       make(chan chan sig),
+		interupt:        make(chan sig),
 	}
+}
 
-	otherDirections = strings.TrimRight(otherDirections, "/")
-
+func (l Light) Start() {
 	go func() {
-		defer close(backToRed)
-
 		for {
 			select {
-			case <-turnGreen:
+			case <-l.done:
+				return
+			case finished := <-l.turnGreen:
 				currentTime := time.Now().Format("15:04:05")
-				fmt.Printf("[Time: %s] %s is GREEN, %s are RED\n", currentTime, direction, otherDirections)
+				fmt.Printf("[Time: %s] %s is GREEN, %s are RED\n", currentTime, l.direction, l.otherDirections)
 
 				select {
-				case <-time.After(2 * time.Second):
-					backToRed <- nil
-				case <-done:
+				case <-l.done:
 					return
+				case <-time.After(2 * time.Second):
+					close(finished)
+				case <-l.interupt:
+					close(finished)
 				}
-			case <-done:
-				return
 			}
 		}
 	}()
+}
 
-	return backToRed
+// returns back a channel that will close once the light is no longer green
+func (l Light) TurnGreen() (<-chan sig, bool) {
+	finished := make(chan sig)
+
+	select {
+	case l.turnGreen <- finished:
+		return finished, true
+	default:
+		// this should only happen if the light is already green
+		return nil, false
+	}
+}
+
+func (l Light) Interupt() bool {
+	select {
+	case l.interupt <- sig{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (l Light) Stop() {
+	close(l.done)
 }
