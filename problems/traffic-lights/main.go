@@ -62,11 +62,7 @@ func run() error {
 	}
 
 	go func() {
-		d := time.Duration(rand.Intn(5)+1) * time.Second
-
-		// d += time.Duration(200 * time.Millisecond)
-
-		<-time.After(d)
+		<-time.After(time.Duration(rand.Intn(5)+1) * time.Second)
 		pedestrian <- sig{}
 	}()
 
