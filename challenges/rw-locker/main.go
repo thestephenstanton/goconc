@@ -124,3 +124,7 @@ func (l *ReadWriteLock) ReleaseWrite() {
 		l.canRead.Broadcast()
 	}
 }
+
+// NOTE: instead of using broadcast for canWrite, there are ways to really make this a lot
+// more optimal by using signal since it is inherently a fifo queue. However to implment
+// this I think it might be a bit messy so broadcast will be fine
